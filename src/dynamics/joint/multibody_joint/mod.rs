@@ -17,3 +17,6 @@ mod multibody_workspace;
 mod multibody_ik;
 mod multibody_joint;
 mod unit_multibody_joint;
+
+#[cfg(all(test, feature = "alloc"))]
+mod multibody_regression_tests;
