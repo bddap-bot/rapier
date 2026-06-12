@@ -18,5 +18,9 @@ mod multibody_ik;
 mod multibody_joint;
 mod unit_multibody_joint;
 
-#[cfg(all(test, feature = "alloc"))]
+// The upstream regression tests for the 752a1844 crash fixes are written
+// against the PhysicsWorld helper and alloc_prelude, neither of which exists
+// on the 0.32 base; the consuming app (bddap/rl) pins the fixes end-to-end
+// through bevy_rapier instead.
+#[cfg(any())]
 mod multibody_regression_tests;

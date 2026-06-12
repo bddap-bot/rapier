@@ -6,7 +6,6 @@
 //! matches what the multibody solver is supposed to produce.
 
 #[cfg(feature = "dim3")]
-use crate::alloc_prelude::*;
 use crate::prelude::*;
 
 /// Regression test for <https://github.com/dimforge/rapier/issues/927> (Bug 1).
