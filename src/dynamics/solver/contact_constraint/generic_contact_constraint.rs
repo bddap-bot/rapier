@@ -104,7 +104,15 @@ impl GenericContactConstraintBuilder {
             *jacobian_id + manifold.data.solver_contacts.len() * multibodies_ndof * 2 * DIM;
 
         if jacobians.nrows() < required_jacobian_len && !cfg!(feature = "parallel") {
-            jacobians.resize_vertically_mut(required_jacobian_len, 0.0);
+            // Grow geometrically, not to the exact size: this workspace is
+            // extended chunk-by-chunk per manifold, and nalgebra reallocates
+            // and copies the whole buffer on every resize — O(M²) bytes moved
+            // per solver step on contact-heavy multibody islands, plus
+            // mmap/munmap churn once the buffer passes the malloc mmap
+            // threshold (the "realloc storm": sys-time-dominated solver,
+            // ~46k minor faults/s). Slack is cheap; copies are not.
+            let target = required_jacobian_len.next_power_of_two();
+            jacobians.resize_vertically_mut(target, 0.0);
         }
 
         let chunk_j_id = *jacobian_id;
