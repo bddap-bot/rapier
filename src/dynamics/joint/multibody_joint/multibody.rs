@@ -3,7 +3,7 @@ use super::multibody_workspace::MultibodyWorkspace;
 use crate::dynamics::{RigidBodyHandle, RigidBodySet, RigidBodyType, RigidBodyVelocity};
 use crate::math::{
     ANG_DIM, AngDim, AngVector, DIM, DVector, Dim, Jacobian, Pose, Real, SPATIAL_DIM,
-    SimdAngVector, Vector,
+    SimdAngVector, SimdVector, Vector,
 };
 use crate::prelude::MultibodyJoint;
 #[cfg(feature = "dim3")]
@@ -81,6 +81,11 @@ pub struct Multibody {
     acc_augmented_mass: DMatrix<Real>,
     acc_inv_augmented_mass: LU<Real, Dyn, Dyn>,
 
+    // Structural mutations (link added/removed, trees merged/split) invalidate
+    // the link poses and body jacobians until the next forward-kinematics pass;
+    // the pipeline uses this to know a kinematics refresh is required even when
+    // no rigid-body change flag is set (bddap/rl#321 gating).
+    pub(crate) kinematics_dirty: bool,
     ndofs: usize,
     pub(crate) root_is_dynamic: bool,
     pub(crate) solver_id: u32,
@@ -118,6 +123,7 @@ impl Multibody {
             acc_augmented_mass: DMatrix::zeros(0, 0),
             acc_inv_augmented_mass: LU::new(DMatrix::zeros(0, 0)),
             augmented_mass_indices: IndexSequence::new(),
+            kinematics_dirty: true,
             ndofs: 0,
             solver_id: 0,
             workspace: MultibodyWorkspace::new(),
@@ -209,6 +215,7 @@ impl Multibody {
     }
 
     pub(crate) fn append(&mut self, mut rhs: Multibody, parent: usize, joint: MultibodyJoint) {
+        self.kinematics_dirty = true;
         let joint_ndofs = joint.ndofs();
         let rhs_root_ndofs = rhs.links[0].joint.ndofs();
         let ndofs_before_append = self.velocities.len();
@@ -221,7 +228,8 @@ impl Multibody {
 
         // Adjust the ids of all the rhs links except the first one.
         for link in &mut rhs.links.0[1..] {
-            link.assembly_id = (link.assembly_id + ndofs_before_append + joint_ndofs) - rhs_root_ndofs;
+            link.assembly_id =
+                (link.assembly_id + ndofs_before_append + joint_ndofs) - rhs_root_ndofs;
             link.internal_id += base_internal_id;
             link.parent_internal_id += base_internal_id;
         }
@@ -349,6 +357,7 @@ impl Multibody {
             parent.is_none() || !self.links.is_empty(),
             "Multibody::build_body: invalid parent id."
         );
+        self.kinematics_dirty = true;
 
         /*
          * Compute the indices.
@@ -490,10 +499,19 @@ impl Multibody {
     /// Computes the constant terms of the dynamics.
     #[profiling::function]
     pub(crate) fn update_dynamics(&mut self, dt: Real, bodies: &mut RigidBodySet) {
+        self.update_link_velocities(bodies);
+
         /*
-         * Compute velocities.
-         * NOTE: this is needed for kinematic bodies too.
+         * Update augmented mass matrix.
          */
+        self.update_inertias(dt, bodies);
+    }
+
+    /// Recomputes the link (and attached rigid-body) velocities from the
+    /// generalized velocities at the current link poses.
+    ///
+    /// NOTE: this is needed for kinematic bodies too.
+    pub(crate) fn update_link_velocities(&mut self, bodies: &mut RigidBodySet) {
         let link = &mut self.links[0];
         let joint_velocity = link
             .joint
@@ -520,11 +538,6 @@ impl Multibody {
 
             bodies.index_mut_internal(link.rigid_body).vels = new_rb_vels;
         }
-
-        /*
-         * Update augmented mass matrix.
-         */
-        self.update_inertias(dt, bodies);
     }
 
     fn update_body_jacobians(&mut self) {
@@ -578,7 +591,7 @@ impl Multibody {
         }
     }
 
-    fn update_inertias(&mut self, dt: Real, bodies: &RigidBodySet) {
+    pub(crate) fn update_inertias(&mut self, dt: Real, bodies: &RigidBodySet) {
         if self.ndofs == 0 {
             return; // Nothing to do.
         }
@@ -597,8 +610,7 @@ impl Multibody {
         // Resize coriolis workspaces if the link count or number of DOFs change.
         let coriolis_ndofs = self.coriolis_v.first().map(|m| m.ncols());
         if self.coriolis_v.len() != self.links.len() || coriolis_ndofs != Some(self.ndofs) {
-            self.coriolis_v =
-                vec![OMatrix::<Real, Dim, Dyn>::zeros(self.ndofs); self.links.len()];
+            self.coriolis_v = vec![OMatrix::<Real, Dim, Dyn>::zeros(self.ndofs); self.links.len()];
             self.coriolis_w =
                 vec![OMatrix::<Real, AngDim, Dyn>::zeros(self.ndofs); self.links.len()];
             self.i_coriolis_dt = Jacobian::zeros(self.ndofs);
@@ -853,6 +865,103 @@ impl Multibody {
     #[inline]
     pub fn generalized_velocity_mut(&mut self) -> DVectorViewMut<'_, Real> {
         self.velocities.rows_mut(0, self.ndofs)
+    }
+
+    /// Total linear momentum of the links, computed through the body jacobians
+    /// at their current configuration: `p = Σₖ mₖ · (Jₖ(q) · q̇)_lin`.
+    pub(crate) fn linear_momentum(&self, bodies: &RigidBodySet) -> SimdVector<Real> {
+        self.map_momentum(bodies, self.velocities.as_view())
+    }
+
+    /// The linear momentum the links would have if the generalized velocity were
+    /// `gen_vels`, through the body jacobians at their current configuration.
+    pub(crate) fn map_momentum(
+        &self,
+        bodies: &RigidBodySet,
+        gen_vels: DVectorView<Real>,
+    ) -> SimdVector<Real> {
+        let mut p = SimdVector::<Real>::zeros();
+        for (i, link) in self.links.iter().enumerate() {
+            let rb = &bodies[link.rigid_body];
+            let jv = self.body_jacobians[i].fixed_rows::<DIM>(0) * gen_vels;
+            p += jv * rb.mprops.mass();
+        }
+        p
+    }
+
+    /// Sum of the external world-frame forces (gravity + user forces) applied to
+    /// the links.
+    pub(crate) fn total_external_force(&self, bodies: &RigidBodySet) -> Vector {
+        let mut f = Vector::ZERO;
+        for link in self.links.iter() {
+            f += bodies[link.rigid_body].forces.force;
+        }
+        f
+    }
+
+    /// Restores the total linear momentum of a floating multibody to `p_target`
+    /// by adding a uniform rigid translation velocity to every link.
+    ///
+    /// A reduced-coordinate position update keeps `q̇` fixed while the momentum
+    /// map `A(q) = M(q)[base-translation rows]` moves, so `p = A(q)·q̇` drifts by
+    /// O(dt²) per substep even though base translation is a cyclic coordinate.
+    /// The minimal-kinetic-energy correction `Δq̇ = M⁻¹Aᵀμ` is exactly a uniform
+    /// `Δv = μ` on all links (base translation moves every link uniformly), so no
+    /// linear solve is needed and joint-space motion is untouched.
+    ///
+    /// Returns the applied uniform velocity correction, or `None` when the
+    /// multibody does not have a floating (6-dof) base.
+    pub(crate) fn reconcile_base_linear_momentum(
+        &mut self,
+        bodies: &mut RigidBodySet,
+        p_target: SimdVector<Real>,
+    ) -> Option<Vector> {
+        if !self.root_is_dynamic || self.links[0].joint.ndofs() != SPATIAL_DIM {
+            return None;
+        }
+
+        // A kinematic link is an external agent with prescribed motion, and a
+        // link with locked translation axes exchanges momentum with the world
+        // through the lock: in both cases momentum is not conserved and the
+        // ledger's mass bookkeeping (scalar mass vs per-axis effective mass)
+        // would be wrong — skip the correction entirely.
+        if self.links.iter().any(|l| {
+            let rb = &bodies[l.rigid_body];
+            !rb.is_dynamic() || rb.mprops.effective_mass() != Vector::splat(rb.mprops.mass())
+        }) {
+            return None;
+        }
+
+        // User damping on the base translation dofs is an external drag whose
+        // momentum sink the ledger does not credit — don't fight it.
+        if (0..DIM).any(|i| self.damping[i] != 0.0) {
+            return None;
+        }
+
+        let mut mass = 0.0;
+        for link in self.links.iter() {
+            mass += bodies[link.rigid_body].mprops.mass();
+        }
+        if mass == 0.0 {
+            return None;
+        }
+
+        let mu = (p_target - self.linear_momentum(bodies)) / mass;
+
+        // The base joint's linear dofs are its (orthonormal) world-frame axes:
+        // columns 0..DIM of the root body jacobian. A uniform link velocity μ
+        // corresponds to the base-dof velocity Bᵀμ.
+        let basis = self.body_jacobians[0].fixed_view::<DIM, DIM>(0, 0);
+        let delta = basis.transpose() * mu;
+        for i in 0..DIM {
+            self.velocities[i] += delta[i];
+        }
+
+        let mu_vect = Vector::from(mu);
+        for link in self.links.iter() {
+            bodies.index_mut_internal(link.rigid_body).vels.linvel += mu_vect;
+        }
+        Some(mu_vect)
     }
 
     #[inline]

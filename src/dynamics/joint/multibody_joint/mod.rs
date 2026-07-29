@@ -24,3 +24,6 @@ mod unit_multibody_joint;
 // through bevy_rapier instead.
 #[cfg(any())]
 mod multibody_regression_tests;
+
+#[cfg(all(test, feature = "dim3", feature = "f32"))]
+mod momentum_tests;

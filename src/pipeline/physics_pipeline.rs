@@ -570,9 +570,32 @@ impl PhysicsPipeline {
         }
         self.counters.stages.user_changes.pause();
 
-        // TODO: do this only on user-change.
-        // TODO: do we want some kind of automatic inverse kinematics?
+        // Refresh the kinematics of multibodies whose bodies had their pose,
+        // type, or structure changed by the user (teleports, newly assembled
+        // trees, dynamic/fixed flips). Doing this for EVERY multibody every
+        // step is not just wasted work: it re-imports the root pose into the
+        // free joint (`update_root_type` with `take_body_pose`) and rebuilds
+        // the body jacobians, which then differ from the solver's own
+        // incremental build by f32 rounding — and momentum bookkeeping that
+        // spans the two builds turns that rounding, scaled by the body's
+        // absolute velocity, into real impulses (bddap/rl#321).
+        const KINEMATIC_CHANGES: RigidBodyChanges = RigidBodyChanges::POSITION
+            .union(RigidBodyChanges::TYPE)
+            .union(RigidBodyChanges::COLLIDERS)
+            .union(RigidBodyChanges::LOCAL_MASS_PROPERTIES)
+            .union(RigidBodyChanges::ENABLED_OR_DISABLED);
         for multibody in &mut multibody_joints.multibodies {
+            let any_modified = multibody.1.kinematics_dirty
+                || multibody.1.links().any(|link| {
+                    bodies
+                        .get(link.rigid_body)
+                        .map(|rb| rb.changes.intersects(KINEMATIC_CHANGES))
+                        .unwrap_or(false)
+                });
+            if !any_modified {
+                continue;
+            }
+            multibody.1.kinematics_dirty = false;
             multibody.1.forward_kinematics(bodies, true);
             multibody
                 .1
