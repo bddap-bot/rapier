@@ -347,6 +347,29 @@ impl Multibody {
         &mut self.damping
     }
 
+    /// Sets the viscous damping coefficient of every free dof of `link_id`'s joint.
+    ///
+    /// The damping is applied implicitly inside the multibody's forward dynamics
+    /// (folded into the augmented mass), so it is unconditionally stable and strictly
+    /// dissipative at any coefficient — unlike an external velocity-motor constraint,
+    /// whose iterative solve can rail against its impulse bounds and inject energy
+    /// when it shares dofs with the multibody it constrains (bddap/rl#347).
+    pub fn set_joint_damping(&mut self, link_id: usize, damping: Real) {
+        if let Some(link) = self.links.get(link_id) {
+            let ndofs = link.joint().ndofs();
+            let assembly_id = link.assembly_id;
+            self.damping.rows_mut(assembly_id, ndofs).fill(damping);
+        }
+    }
+
+    /// The viscous damping coefficients of `link_id`'s joint dofs, as set by
+    /// [`Self::set_joint_damping`] (or the joint's default damping).
+    pub fn joint_damping(&self, link_id: usize) -> Option<&[Real]> {
+        let link = self.links.get(link_id)?;
+        let ndofs = link.joint().ndofs();
+        Some(&self.damping.as_slice()[link.assembly_id..link.assembly_id + ndofs])
+    }
+
     pub(crate) fn add_link(
         &mut self,
         parent: Option<usize>, // TODO: should be a RigidBodyHandle?
