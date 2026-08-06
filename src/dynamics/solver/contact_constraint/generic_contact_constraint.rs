@@ -12,6 +12,27 @@ use crate::prelude::RigidBodyHandle;
 use crate::utils::OrthonormalBasis;
 use parry::math::Vector;
 
+/// The same-multibody cross terms of a generic contact's effective mass
+/// (bddap/rl#349, sibling of the generic-joint fix for bddap/rl#347): when both
+/// colliders are links of ONE multibody, both sides' impulses land on the same
+/// generalized-velocity vector, so the constraint's true effective lhs is
+/// (j1 + j2)·M⁻¹·(j1 + j2)ᵀ = j1·wj1 + j2·wj2 + j1·wj2 + j2·wj1 (side 2's
+/// jacobian already carries the negated direction). Summing only the self terms
+/// lets the computed lhs undershoot wherever the cross coupling is strongly
+/// positive; the Gauss-Seidel iteration then over-relaxes and can diverge inside
+/// one step, injecting the unbounded contact impulse as a velocity spike on a
+/// light link.
+///
+/// `j_id0` is the jacobian cursor BEFORE side 1's `fill_jacobians`; both sides
+/// share the multibody's `ndofs`, so the four row blocks are j1, wj1, j2, wj2.
+fn same_multibody_cross_term(j_id0: usize, ndofs: usize, jacobians: &DVector) -> Real {
+    let j1 = jacobians.rows(j_id0, ndofs);
+    let wj1 = jacobians.rows(j_id0 + ndofs, ndofs);
+    let j2 = jacobians.rows(j_id0 + ndofs * 2, ndofs);
+    let wj2 = jacobians.rows(j_id0 + ndofs * 3, ndofs);
+    j1.dot(&wj2) + j2.dot(&wj1)
+}
+
 #[derive(Copy, Clone)]
 pub(crate) struct GenericContactConstraintBuilder {
     infos: [CoulombContactPointInfos<Real>; MAX_MANIFOLD_POINTS],
@@ -85,6 +106,15 @@ impl GenericContactConstraintBuilder {
                 } else {
                     u32::MAX
                 });
+        // A self-contact: both colliders are links of ONE multibody, so both sides'
+        // impulses land on the same generalized-velocity vector and the effective
+        // mass needs the cross terms ([`same_multibody_cross_term`]). Requires both
+        // sides multibody: `solver_vel` alone can collide across the generic/rigid
+        // id spaces.
+        let is_same_multibody =
+            multibody1.is_some() && multibody2.is_some() && solver_vel1 == solver_vel2;
+        let ndofs1_val = multibody1.map(|m| m.0.ndofs()).unwrap_or(0);
+
         let force_dir1 = -manifold.data.normal;
 
         #[cfg(feature = "dim2")]
@@ -171,6 +201,7 @@ impl GenericContactConstraintBuilder {
                     Default::default()
                 };
 
+                let j_id0 = *jacobian_id;
                 let inv_r1 = if let Some((mb1, link_id1)) = multibody1.as_ref() {
                     mb1.fill_jacobians(*link_id1, force_dir1, torque_dir1, jacobian_id, jacobians)
                         .0
@@ -191,7 +222,12 @@ impl GenericContactConstraintBuilder {
                     0.0
                 };
 
-                let r = crate::utils::inv(inv_r1 + inv_r2);
+                let cross = if is_same_multibody {
+                    same_multibody_cross_term(j_id0, ndofs1_val, jacobians).max(0.0)
+                } else {
+                    0.0
+                };
+                let r = crate::utils::inv(inv_r1 + inv_r2 + cross);
 
                 let is_bouncy = manifold_point.is_bouncy() as u32 as Real;
 
@@ -240,6 +276,7 @@ impl GenericContactConstraintBuilder {
                     out_constraint.tangent_part[k].ii_torque_dir2[j] = ii_torque_dir2;
 
                     let tangent_glam = tangents1[j];
+                    let j_id0 = *jacobian_id;
                     let inv_r1 = if let Some((mb1, link_id1)) = multibody1.as_ref() {
                         mb1.fill_jacobians(
                             *link_id1,
@@ -272,7 +309,12 @@ impl GenericContactConstraintBuilder {
                         0.0
                     };
 
-                    let r = crate::utils::inv(inv_r1 + inv_r2);
+                    let cross = if is_same_multibody {
+                        same_multibody_cross_term(j_id0, ndofs1_val, jacobians).max(0.0)
+                    } else {
+                        0.0
+                    };
+                    let r = crate::utils::inv(inv_r1 + inv_r2 + cross);
                     let rhs_wo_bias = manifold_point.tangent_velocity.gdot(tangents1[j]);
 
                     out_constraint.tangent_part[k].rhs_wo_bias[j] = rhs_wo_bias;
