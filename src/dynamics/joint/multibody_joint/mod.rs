@@ -33,3 +33,6 @@ mod unit_multibody_joint;
 
 #[cfg(all(test, feature = "alloc"))]
 mod multibody_regression_tests;
+
+#[cfg(all(test, feature = "dim3", feature = "f32"))]
+mod momentum_tests;

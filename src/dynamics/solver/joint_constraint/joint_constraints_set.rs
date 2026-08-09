@@ -66,6 +66,69 @@ impl JointConstraintsSet {
 }
 
 impl JointConstraintsSet {
+    /// Re-derives every constraint that touches a multibody (internal joint
+    /// limits/motors, and external joints with a multibody side) from the
+    /// multibodies' current positions and mass matrices, preserving the
+    /// accumulated impulses so the impulse bounds keep their meaning.
+    ///
+    /// Called after the substep position integration so the bias-free
+    /// stabilization solves apply impulses through the up-to-date inverse mass
+    /// matrix: a multibody generalized impulse is momentum-neutral only
+    /// through the mass matrix of the configuration it is applied at
+    /// (bddap/rl#321). Rigid-rigid constraints are equal/opposite in maximal
+    /// coordinates and never leak momentum, so they are left untouched.
+    #[profiling::function]
+    pub(crate) fn update_multibody_coupled(
+        &mut self,
+        params: &crate::dynamics::IntegrationParameters,
+        multibodies: &MultibodyJointSet,
+        solver_bodies: &crate::dynamics::solver::solver_body::SolverBodies,
+    ) {
+        // Also preserve the impulse bounds: re-deriving recomputes limit
+        // activation from the post-integration position, and a limit that
+        // deactivated mid-substep would get [0, 0] bounds — forcing the
+        // stabilization solve to retract the impulse it already applied, i.e.
+        // an elastic bounce where the stop was inelastic. The re-derivation is
+        // only meant to refresh the jacobians and mass matrix.
+        let impulses: Vec<(Real, [Real; 2])> = self
+            .generic_velocity_constraints
+            .iter()
+            .map(|c| (c.impulse, c.impulse_bounds))
+            .collect();
+
+        for builder in &mut self.generic_velocity_constraints_builder {
+            match builder {
+                GenericJointConstraintBuilder::External(builder) => {
+                    builder.update(
+                        params,
+                        multibodies,
+                        solver_bodies,
+                        &mut self.generic_jacobians,
+                        &mut self.generic_velocity_constraints,
+                    );
+                }
+                GenericJointConstraintBuilder::Internal(builder) => {
+                    builder.update(
+                        params,
+                        multibodies,
+                        &mut self.generic_jacobians,
+                        &mut self.generic_velocity_constraints,
+                    );
+                }
+                GenericJointConstraintBuilder::Empty => {}
+            }
+        }
+
+        for (c, (impulse, bounds)) in self
+            .generic_velocity_constraints
+            .iter_mut()
+            .zip(impulses.into_iter())
+        {
+            c.impulse = impulse;
+            c.impulse_bounds = bounds;
+        }
+    }
+
     pub(crate) fn compute_generic_joint_constraints(
         &mut self,
         island_bodies: &[crate::dynamics::RigidBodyHandle],

@@ -807,7 +807,21 @@ impl JointConstraintHelper<Real> {
             let w_jac_j1 = jacobians.rows(c_j.j_id1 + ndofs1, ndofs1);
             let w_jac_j2 = jacobians.rows(c_j.j_id2 + ndofs2, ndofs2);
 
-            let dot_jj = jac_j1.dot(&w_jac_j1) + jac_j2.dot(&w_jac_j2);
+            let mut dot_jj = jac_j1.dot(&w_jac_j1) + jac_j2.dot(&w_jac_j2);
+            // When both attachments are links of the SAME multibody, j1 and j2 act on
+            // the same generalized-velocity vector, so the constraint's true effective
+            // lhs is (j2 − j1)·M⁻¹·(j2 − j1)ᵀ — the self-terms above MINUS the cross
+            // terms. Omitting them overestimates inv_lhs; on a stiff pairing (a light
+            // link with strongly-coupled adjacent dofs) the iteration then overshoots,
+            // rails at the impulse bounds, and injects the residual as velocity — the
+            // claw-whip energy source (bddap/rl#347).
+            if !c_j.is_rigid_body1
+                && !c_j.is_rigid_body2
+                && c_j.solver_vel1 == c_j.solver_vel2
+                && c_j.solver_vel1 != u32::MAX
+            {
+                dot_jj -= jac_j1.dot(&w_jac_j2) + jac_j2.dot(&w_jac_j1);
+            }
             let cfm_gain = dot_jj * c_j.cfm_coeff + c_j.cfm_gain;
             let inv_dot_jj = crate::utils::simd_inv(dot_jj);
             c_j.inv_lhs = crate::utils::simd_inv(dot_jj + cfm_gain); // Don’t forget to update the inv_lhs.

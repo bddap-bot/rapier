@@ -625,6 +625,20 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     let bodies = unsafe { &mut *ctx.bodies };
                     let multibodies = unsafe { &mut *ctx.multibodies };
                     vs.integrate_multibody_positions(params, is_last_substep, bodies, multibodies);
+                    // Positions (and multibody mass matrices) moved: re-derive the
+                    // multibody-coupled constraints so the stabilization impulses go
+                    // through the current inverse mass matrix. With the old one they
+                    // inject net linear momentum (bddap/rl#321). Safe here: only
+                    // worker 0 touches `joint_constraints` during this stage, and the
+                    // sync barrier below publishes the rebuild before any solve pass.
+                    if params.num_internal_stabilization_iterations > 0 {
+                        let joint_constraints = unsafe { &mut *ctx.joint_constraints };
+                        joint_constraints.update_multibody_coupled(
+                            params,
+                            multibodies,
+                            &vs.solver_bodies,
+                        );
+                    }
                     sync.complete(stage, 1, num_group_bodies + 1);
                 }
                 stage = sync.sync(stage, num_group_bodies + 1);

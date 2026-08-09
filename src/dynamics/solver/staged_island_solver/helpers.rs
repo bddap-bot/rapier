@@ -135,13 +135,48 @@ impl VelocitySolver {
                 .generic_solver_vels
                 .rows(multibody.solver_id as usize, multibody.ndofs());
             multibody.velocities.copy_from(&solver_vels);
+            // Momentum ledger for this substep, through the pre-update momentum
+            // map A(q). Base translation is a cyclic coordinate, so across the
+            // whole substep the base linear momentum may change only by external
+            // actions: p_target = A(q)·q̇ − A(q)·increment + dt·ΣF_ext.
+            //
+            // The increment's momentum flow is subtracted because its coriolis
+            // part exists solely to compensate the continuous-time momentum-map
+            // change — which `reconcile_base_linear_momentum` below neutralizes
+            // exactly — while its external-force part is re-credited exactly via
+            // dt·ΣF_ext. Constraint impulses need no bookkeeping: internal ones
+            // are momentum-free through A(q) by construction, and external ones
+            // (contacts, joints to rigid bodies) land in A(q)·q̇ exactly.
+            let incr = self
+                .generic_solver_vels_increment
+                .rows(multibody.solver_id as usize, multibody.ndofs());
+            let p_target = multibody.linear_momentum(bodies) - multibody.map_momentum(bodies, incr)
+                + crate::utils::vect_to_na(multibody.total_external_force(bodies)) * params.dt;
             multibody.integrate(params.dt);
             multibody.forward_kinematics(bodies, false);
-            multibody.update_rigid_bodies_internal(bodies, !is_last_substep, true, false);
+            // Mass properties (notably `world_com`) must be refreshed on every
+            // substep: `update_velocities` derives link velocities from them, and
+            // the momentum reconciliation below needs those velocities to match
+            // the body jacobians exactly.
+            multibody.update_rigid_bodies_internal(bodies, true, true, false);
+            multibody.update_velocities(bodies);
+
+            if multibody
+                .reconcile_base_linear_momentum(bodies, p_target)
+                .is_some()
+            {
+                let mut solver_vels = self
+                    .generic_solver_vels
+                    .rows_mut(multibody.solver_id as usize, multibody.ndofs());
+                solver_vels.copy_from(&multibody.velocities);
+            }
+
+            // Unconditional (even on the last substep): the stabilization
+            // solves that follow re-derive the internal constraints from this
+            // mass matrix.
+            multibody.update_mass_matrix(params.dt, bodies);
 
             if !is_last_substep {
-                multibody.update_velocities(bodies);
-                multibody.update_mass_matrix(params.dt, bodies);
                 multibody.update_acceleration(params.dt, bodies);
 
                 let mut solver_vels_incr = self

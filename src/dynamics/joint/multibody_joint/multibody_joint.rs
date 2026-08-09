@@ -168,7 +168,11 @@ impl MultibodyJoint {
             3 => {
                 let angvel = Vector::from_slice(&vels[curr_free_dof..curr_free_dof + 3]);
                 let disp = Rotation::from_scaled_axis(angvel * dt);
-                self.joint_rot = disp * self.joint_rot;
+                // Renormalize: the incremental quaternion product lets |q| drift
+                // away from 1, which scales every rotation derived from it
+                // (`to_mat` scales by |q|²) — downstream this shows up as
+                // phantom collider re-scaling and link mass drift (bddap/rl#321).
+                self.joint_rot = (disp * self.joint_rot).normalize();
                 self.coords[3] += angvel[0] * dt;
                 self.coords[4] += angvel[1] * dt;
                 self.coords[5] += angvel[2] * dt;
