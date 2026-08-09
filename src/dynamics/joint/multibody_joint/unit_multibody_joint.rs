@@ -59,11 +59,19 @@ pub fn unit_joint_limit_constraint(
         joint_id: usize::MAX, // TODO: we don’t support impulse writeback for internal constraints yet.
         impulse: 0.0,
         impulse_bounds,
-        inv_lhs: crate::utils::inv(lhs),
+        // Fold the joint softness's CFM into the constraint exactly as the
+        // impulse-joint finalize does (cfm_gain = lhs·cfm_coeff, folded into
+        // inv_lhs). Before this the coefficient was stored and never read on the
+        // multibody-internal path, leaving every multibody joint LIMIT an
+        // unregularized rigid unilateral constraint no matter what softness the
+        // joint declared — the divergent half of the limit-vs-contact fight that
+        // exits the velocity solve at hundreds of rad/s on near-massless links
+        // (bddap/rl#349).
+        inv_lhs: crate::utils::inv(lhs + lhs * cfm_coeff),
         rhs: rhs_wo_bias + rhs_bias,
         rhs_wo_bias,
         cfm_coeff,
-        cfm_gain: 0.0,
+        cfm_gain: lhs * cfm_coeff,
         writeback_id: WritebackId::Limit(dof_id),
     };
 
@@ -132,8 +140,10 @@ pub fn unit_joint_motor_constraint(
         impulse: 0.0,
         impulse_bounds,
         cfm_coeff: motor_params.cfm_coeff,
-        cfm_gain: motor_params.cfm_gain,
-        inv_lhs: crate::utils::inv(lhs),
+        // Same dead-coefficient repair as the limit constraint above: fold the
+        // motor model's CFM into the effective mass instead of dropping it.
+        cfm_gain: motor_params.cfm_gain + lhs * motor_params.cfm_coeff,
+        inv_lhs: crate::utils::inv(lhs + motor_params.cfm_gain + lhs * motor_params.cfm_coeff),
         rhs: rhs_wo_bias,
         rhs_wo_bias,
         writeback_id: WritebackId::Limit(dof_id),
