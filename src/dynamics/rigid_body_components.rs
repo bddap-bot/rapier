@@ -1438,12 +1438,19 @@ impl RigidBodyActivation {
                 let prev_pose = core::mem::replace(&mut self.sleep_prev_pose, *pose);
                 let angular_ok = if max_extent > 0.0 {
                     use crate::num::FloatConst;
-                    // Use a fixed angular threshold that unambiguously imply movement.
-                    // The position-based criteria will be more restrictive, but we keep
-                    // this for the rare case where the orientation’s periodicity would
-                    // make the pose drift estimate too approximate.
-                    self.angular_threshold >= 0.0
-                        && sq_angvel < Real::FRAC_PI_2() * Real::FRAC_PI_2()
+                    // A sanity gate against angular velocities so high that the
+                    // orientation’s periodicity would make the pose drift estimate
+                    // too approximate; the position-based criteria (which fold
+                    // rotation in via `max_extent`) are the restrictive check.
+                    // π/2 unless the user raised `angular_threshold` above it:
+                    // an under-converged contact solve can report several rad/s of
+                    // phantom angular velocity on a body whose pose is static
+                    // (near-massless articulated links at rest), and a body
+                    // configured to sleep through that noise must not be pinned
+                    // awake by the sanity gate — genuine tumbling still shows up
+                    // as pose drift and blocks sleep there (bddap/rl#392).
+                    let gate = Real::FRAC_PI_2().max(self.angular_threshold);
+                    self.angular_threshold >= 0.0 && sq_angvel < gate * gate
                 } else {
                     // Collider-less bodies have `max_extent == 0` so we need to take its
                     // angular velocity into account since the pose delta cannot take its
