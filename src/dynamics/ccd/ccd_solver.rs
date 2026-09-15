@@ -36,7 +36,7 @@ pub struct CCDSolver {
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     fixed_targets_cache: Option<FixedTargetsCache>,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    clamped_bodies: Vec<RigidBodyHandle>,
+    clamp_candidates: Vec<RigidBodyHandle>,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     clamp_tracking_enabled: bool,
 }
@@ -51,24 +51,24 @@ impl CCDSolver {
         Self::default()
     }
 
-    /// Retains every clamp occurrence since construction or the last
-    /// [`Self::drain_clamped_bodies`] call.
-    pub fn clamped_bodies(&self) -> &[RigidBodyHandle] {
-        &self.clamped_bodies
+    /// Retains every impact candidate since construction or the last
+    /// [`Self::drain_clamp_candidates`] call.
+    pub fn clamp_candidates(&self) -> &[RigidBodyHandle] {
+        &self.clamp_candidates
     }
 
-    /// Enables or disables retention of clamp occurrences for diagnostics.
+    /// Enables or disables retention of impact candidates for diagnostics.
     pub fn set_clamp_tracking_enabled(&mut self, enabled: bool) {
         self.clamp_tracking_enabled = enabled;
         if !enabled {
-            self.clamped_bodies.clear();
+            self.clamp_candidates.clear();
         }
     }
 
-    /// Drains every retained clamp occurrence so callers can attribute CCD incidence without
-    /// mistaking the broader `ccd_active` eligibility flag for an impact.
-    pub fn drain_clamped_bodies(&mut self) -> impl Iterator<Item = RigidBodyHandle> + '_ {
-        self.clamped_bodies.drain(..)
+    /// Drains every retained impact candidate, including multibody candidates omitted from
+    /// clamping, so callers can attribute CCD incidence without changing the trajectory.
+    pub fn drain_clamp_candidates(&mut self) -> impl Iterator<Item = RigidBodyHandle> + '_ {
+        self.clamp_candidates.drain(..)
     }
 
     /// Updates the set of bodies that needs CCD to be resolved.
@@ -208,7 +208,11 @@ impl CCDSolver {
         // the tree leak into the next step's broad phase (pair explosion, ~2x narrow-phase cost).
         let (non_bullets, bullets): (Vec<_>, Vec<_>) = islands
             .active_bodies()
-            .filter(|h| bodies[*h].ccd.ccd_active && multibody_joints.rigid_body_link(*h).is_none())
+            .filter(|h| {
+                bodies[*h].ccd.ccd_active
+                    && (self.clamp_tracking_enabled
+                        || multibody_joints.rigid_body_link(*h).is_none())
+            })
             .partition(|h| !is_bullet(&bodies[*h]));
 
         let mut all_results = Vec::new();
@@ -242,7 +246,7 @@ impl CCDSolver {
                 Some(fixed) => CcdTargets::FixedList(fixed),
                 None => CcdTargets::FullBvh(bvh),
             };
-            let results = map_bodies_parallel(&non_bullets, hooks, |handle, hooks| {
+            let mut results = map_bodies_parallel(&non_bullets, hooks, |handle, hooks| {
                 sweep_fast_body(
                     handle,
                     bodies,
@@ -256,6 +260,7 @@ impl CCDSolver {
                     PseudoHitMode::Record,
                 )
             });
+            self.retain_applicable_results(multibody_joints, &mut results);
             all_results.extend(results);
         }
         self.apply_clamps(bodies, &all_results);
@@ -263,7 +268,7 @@ impl CCDSolver {
         // Pass 2: bullets vs everything except other bullets. Targets read the (already
         // clamped) `next_position` from pass 1 (deferred bullet stage).
         if !bullets.is_empty() {
-            let bullet_results = {
+            let mut bullet_results = {
                 let query_pipeline = broad_phase.as_query_pipeline(
                     narrow_phase.query_dispatcher(),
                     bodies,
@@ -286,6 +291,7 @@ impl CCDSolver {
                     )
                 })
             };
+            self.retain_applicable_results(multibody_joints, &mut bullet_results);
             self.apply_clamps(bodies, &bullet_results);
             all_results.extend(bullet_results);
         }
@@ -359,7 +365,7 @@ impl CCDSolver {
         for result in results {
             if result.fraction < 1.0 {
                 if self.clamp_tracking_enabled {
-                    self.clamped_bodies.push(result.handle);
+                    self.clamp_candidates.push(result.handle);
                 }
                 let rb = bodies.index_mut_internal(result.handle);
                 let sweep = Sweep::from_poses(
@@ -370,5 +376,22 @@ impl CCDSolver {
                 rb.pos.next_position = sweep.transform_at(result.fraction);
             }
         }
+    }
+
+    fn retain_applicable_results(
+        &mut self,
+        multibody_joints: &MultibodyJointSet,
+        results: &mut Vec<BodyContinuousResult>,
+    ) {
+        results.retain(|result| {
+            if multibody_joints.rigid_body_link(result.handle).is_none() {
+                true
+            } else {
+                if result.fraction < 1.0 {
+                    self.clamp_candidates.push(result.handle);
+                }
+                false
+            }
+        });
     }
 }

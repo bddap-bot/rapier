@@ -98,11 +98,11 @@ fn default_ccd_vs_fixed_no_tunnel() {
     let body = insert_fast_dynamic(&mut h, /* ccd_enabled */ false);
 
     h.step();
-    assert_eq!(h.ccd.clamped_bodies(), &[body]);
+    assert_eq!(h.ccd.clamp_candidates(), &[body]);
     h.step();
-    assert_eq!(h.ccd.clamped_bodies().first(), Some(&body));
-    assert_eq!(h.ccd.drain_clamped_bodies().next(), Some(body));
-    assert!(h.ccd.clamped_bodies().is_empty());
+    assert_eq!(h.ccd.clamp_candidates().first(), Some(&body));
+    assert_eq!(h.ccd.drain_clamp_candidates().next(), Some(body));
+    assert!(h.ccd.clamp_candidates().is_empty());
     h.run(118);
 
     // The body should have been stopped on the near (-X) side of the wall.
@@ -206,6 +206,7 @@ struct HingeSweep {
     anchor_separation: Real,
     angle: Real,
     ccd_active: bool,
+    clamp_candidate: bool,
 }
 
 const HINGE_BARRIER_ANGLE: Real = -0.78;
@@ -276,6 +277,7 @@ fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
             .length()
             .atan2(rotation_delta.w.abs());
     let angle = body_pose.rotation.to_scaled_axis().z;
+    let clamp_candidate = h.ccd.clamp_candidates().contains(&child);
 
     HingeSweep {
         body_link_translation: (body_pose.translation - link_pose.translation).length(),
@@ -283,6 +285,7 @@ fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
         anchor_separation: (anchor1 - anchor2).length(),
         angle,
         ccd_active: h.bodies[child].is_ccd_active(),
+        clamp_candidate,
     }
 }
 
@@ -318,6 +321,8 @@ fn multibody_hard_ccd_hinge_sweep_stays_coherent() {
         hard.ccd_active,
         "the hard-CCD eligibility threshold was not crossed: {hard:?}"
     );
+    assert!(hard.clamp_candidate, "the hard-CCD sweep missed: {hard:?}");
+    assert!(!soft.clamp_candidate, "hard CCD was disabled: {soft:?}");
 }
 
 /// A fast dynamic **trimesh** body is never swept (there is no continuous collision for
