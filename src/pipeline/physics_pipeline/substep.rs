@@ -56,6 +56,7 @@ impl PhysicsPipeline {
         integration_parameters: &IntegrationParameters,
         islands: &IslandManager,
         bodies: &mut RigidBodySet,
+        multibody_joints: &MultibodyJointSet,
         colliders: &mut ColliderSet,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &NarrowPhase,
@@ -71,6 +72,7 @@ impl PhysicsPipeline {
             integration_parameters,
             islands,
             bodies,
+            multibody_joints,
             colliders,
             broad_phase,
             narrow_phase,
@@ -282,6 +284,7 @@ impl PhysicsPipeline {
         self.counters.reset();
         self.counters.step_started();
         self.quarantine.clear();
+        ccd_solver.clear_clamped_bodies();
 
         // Apply some of delayed wake-ups.
         self.counters.stages.user_changes.start();
@@ -455,6 +458,7 @@ impl PhysicsPipeline {
                         &integration_parameters,
                         islands,
                         bodies,
+                        multibody_joints,
                         colliders,
                         broad_phase,
                         narrow_phase,
@@ -531,6 +535,7 @@ impl PhysicsPipeline {
                         &integration_parameters,
                         islands,
                         bodies,
+                        multibody_joints,
                         colliders,
                         broad_phase,
                         narrow_phase,

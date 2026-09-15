@@ -95,7 +95,9 @@ fn default_ccd_vs_fixed_no_tunnel() {
     insert_thin_fixed_wall(&mut h);
     let body = insert_fast_dynamic(&mut h, /* ccd_enabled */ false);
 
-    h.run(120);
+    h.step();
+    assert_eq!(h.ccd.clamped_bodies(), &[body]);
+    h.run(119);
 
     // The body should have been stopped on the near (-X) side of the wall.
     assert!(
@@ -188,6 +190,126 @@ fn global_ccd_off_tunnels() {
         h.x(body) > 1.0,
         "body should tunnel through the wall when CCD is globally disabled (x = {})",
         h.x(body)
+    );
+}
+
+#[derive(Debug)]
+struct HingeSweep {
+    body_link_translation: Real,
+    body_link_rotation: Real,
+    anchor_separation: Real,
+    lowest_point: Real,
+    highest_point: Real,
+    motion_fraction: Real,
+    ccd_active: bool,
+}
+
+fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
+    let mut h = Harness::new();
+    h.params.max_ccd_substeps = max_ccd_substeps;
+    h.params.dt = 1.0 / 30.0;
+
+    let plane = h.bodies.insert(RigidBodyBuilder::fixed());
+    h.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(5.0, 0.025, 5.0),
+        plane,
+        &mut h.bodies,
+    );
+
+    let pivot = Vector::new(0.0, 0.75, 0.0);
+    let half_length = 0.4;
+    let base = h
+        .bodies
+        .insert(RigidBodyBuilder::fixed().translation(pivot));
+    let child = h.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(pivot + Vector::X * half_length)
+            .soft_ccd_prediction(0.5),
+    );
+    let child_collider = h.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(half_length, 0.025, 0.025),
+        child,
+        &mut h.bodies,
+    );
+    let joint = h
+        .multibody_joints
+        .insert(
+            base,
+            child,
+            RevoluteJointBuilder::new(Vector::Z)
+                .local_anchor1(Vector::ZERO)
+                .local_anchor2(-Vector::X * half_length),
+            true,
+        )
+        .unwrap();
+
+    h.step();
+    {
+        let (multibody, link_id) = h.multibody_joints.get_mut(joint).unwrap();
+        let row = multibody.link(link_id).unwrap().assembly_id();
+        multibody.generalized_velocity_mut()[row] = -45.0;
+        multibody.damping_mut()[row] = 0.0;
+    }
+    h.step();
+
+    let body_pose = *h.bodies[child].position();
+    let (multibody, link_id) = h.multibody_joints.get(joint).unwrap();
+    let link_pose = *multibody.link(link_id).unwrap().local_to_world();
+    let anchor1 = h.bodies[base].position() * Vector::ZERO;
+    let anchor2 = body_pose * (-Vector::X * half_length);
+    let rotation_delta = body_pose.rotation * link_pose.rotation.inverse();
+    let body_link_rotation = 2.0
+        * Vector::new(rotation_delta.x, rotation_delta.y, rotation_delta.z)
+            .length()
+            .atan2(rotation_delta.w.abs());
+    let lowest_point = h.colliders[child_collider].compute_aabb().mins.y;
+    let highest_point = h.colliders[child_collider].compute_aabb().maxs.y;
+    let motion_fraction =
+        body_pose.rotation.to_scaled_axis().z / link_pose.rotation.to_scaled_axis().z;
+
+    HingeSweep {
+        body_link_translation: (body_pose.translation - link_pose.translation).length(),
+        body_link_rotation,
+        anchor_separation: (anchor1 - anchor2).length(),
+        lowest_point,
+        highest_point,
+        motion_fraction,
+        ccd_active: h.bodies[child].is_ccd_active(),
+    }
+}
+
+#[test]
+fn multibody_hard_ccd_hinge_sweep_stays_coherent() {
+    let hard = one_hinge_sweep(1);
+    let soft = one_hinge_sweep(0);
+    println!("hard CCD: {hard:?}; hard CCD off: {soft:?}");
+
+    for (label, sweep) in [("hard CCD", &hard), ("hard CCD off", &soft)] {
+        assert!(
+            sweep.body_link_translation.is_finite()
+                && sweep.body_link_rotation.is_finite()
+                && sweep.anchor_separation.is_finite()
+                && sweep.lowest_point.is_finite()
+                && sweep.highest_point.is_finite()
+                && sweep.motion_fraction.is_finite(),
+            "{label} produced non-finite state: {sweep:?}"
+        );
+        assert!(
+            sweep.body_link_translation < 1.0e-5 && sweep.body_link_rotation < 1.0e-5,
+            "{label} desynchronized the rigid body and multibody link: {sweep:?}"
+        );
+        assert!(
+            sweep.anchor_separation < 1.0e-5,
+            "{label} separated the revolute anchors: {sweep:?}"
+        );
+        assert!(
+            sweep.highest_point >= -0.025,
+            "{label} tunneled through the fixed plane: {sweep:?}"
+        );
+    }
+    assert!(
+        hard.ccd_active,
+        "the hard-CCD arm never activated: {hard:?}"
     );
 }
 

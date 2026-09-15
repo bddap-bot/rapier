@@ -1,5 +1,7 @@
 use crate::alloc_prelude::*;
-use crate::dynamics::{IntegrationParameters, IslandManager, RigidBodySet};
+use crate::dynamics::{
+    IntegrationParameters, IslandManager, MultibodyJointSet, RigidBodyHandle, RigidBodySet,
+};
 use crate::geometry::{
     BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, CollisionEvent, NarrowPhase,
 };
@@ -19,10 +21,12 @@ use super::sweeps::{
 /// and `next_position` is clamped to the earliest impact — velocities untouched, no re-solve; the
 /// residual approach resolves next step via speculative contacts.
 ///
-/// Fast dynamic bodies automatically sweep against **fixed** colliders; `ccd_enabled` upgrades to
-/// a *bullet* that also sweeps kinematic/dynamic bodies (never other bullets). Mesh-like colliders
-/// are never swept as the *moving* shape (targets are fine), compounds sweep per
-/// convex child, and [`IntegrationParameters::max_ccd_substeps`] `= 0` disables CCD entirely.
+/// Fast dynamic bodies automatically sweep against **fixed** colliders; reduced-coordinate
+/// multibody links are omitted because clamping one body would invalidate its generalized state.
+/// `ccd_enabled` upgrades other bodies to a *bullet* that also sweeps kinematic/dynamic bodies
+/// (never other bullets). Mesh-like colliders are never swept as the *moving* shape (targets are
+/// fine), compounds sweep per convex child, and [`IntegrationParameters::max_ccd_substeps`] `= 0`
+/// disables CCD entirely.
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct CCDSolver {
@@ -31,6 +35,8 @@ pub struct CCDSolver {
     /// the scene-change flag — re-scanning every collider each step dominated CCD on large scenes.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     fixed_targets_cache: Option<FixedTargetsCache>,
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    clamped_bodies: Vec<RigidBodyHandle>,
 }
 
 /// The AABB loosening the cached fixed-target list was built with, paired with the list
@@ -41,6 +47,16 @@ impl CCDSolver {
     /// Initializes a new CCD solver
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Retains every clamp occurrence from the last pipeline step so callers can attribute CCD
+    /// incidence without mistaking the broader `ccd_active` eligibility flag for an impact.
+    pub fn clamped_bodies(&self) -> &[RigidBodyHandle] {
+        &self.clamped_bodies
+    }
+
+    pub(crate) fn clear_clamped_bodies(&mut self) {
+        self.clamped_bodies.clear();
     }
 
     /// Updates the set of bodies that needs CCD to be resolved.
@@ -101,6 +117,7 @@ impl CCDSolver {
         params: &IntegrationParameters,
         islands: &IslandManager,
         bodies: &RigidBodySet,
+        multibody_joints: &MultibodyJointSet,
         colliders: &ColliderSet,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &NarrowPhase,
@@ -120,7 +137,7 @@ impl CCDSolver {
         let linear_slop = params.allowed_linear_error();
         let fast_bodies: Vec<_> = islands
             .active_bodies()
-            .filter(|h| bodies[*h].ccd.ccd_active)
+            .filter(|h| bodies[*h].ccd.ccd_active && multibody_joints.rigid_body_link(*h).is_none())
             .collect();
 
         let fractions = map_bodies_parallel(&fast_bodies, hooks, |handle, hooks| {
@@ -160,6 +177,7 @@ impl CCDSolver {
         params: &IntegrationParameters,
         islands: &IslandManager,
         bodies: &mut RigidBodySet,
+        multibody_joints: &MultibodyJointSet,
         colliders: &ColliderSet,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &NarrowPhase,
@@ -178,7 +196,7 @@ impl CCDSolver {
         // the tree leak into the next step's broad phase (pair explosion, ~2x narrow-phase cost).
         let (non_bullets, bullets): (Vec<_>, Vec<_>) = islands
             .active_bodies()
-            .filter(|h| bodies[*h].ccd.ccd_active)
+            .filter(|h| bodies[*h].ccd.ccd_active && multibody_joints.rigid_body_link(*h).is_none())
             .partition(|h| !is_bullet(&bodies[*h]));
 
         let mut all_results = Vec::new();
@@ -228,7 +246,7 @@ impl CCDSolver {
             });
             all_results.extend(results);
         }
-        Self::apply_clamps(bodies, &all_results);
+        self.apply_clamps(bodies, &all_results);
 
         // Pass 2: bullets vs everything except other bullets. Targets read the (already
         // clamped) `next_position` from pass 1 (deferred bullet stage).
@@ -256,7 +274,7 @@ impl CCDSolver {
                     )
                 })
             };
-            Self::apply_clamps(bodies, &bullet_results);
+            self.apply_clamps(bodies, &bullet_results);
             all_results.extend(bullet_results);
         }
 
@@ -325,9 +343,10 @@ impl CCDSolver {
 
     /// Clamps each impacted body's `next_position` to the interpolated pose at its impact
     /// fraction. Pose only — velocities are preserved.
-    fn apply_clamps(bodies: &mut RigidBodySet, results: &[BodyContinuousResult]) {
+    fn apply_clamps(&mut self, bodies: &mut RigidBodySet, results: &[BodyContinuousResult]) {
         for result in results {
             if result.fraction < 1.0 {
+                self.clamped_bodies.push(result.handle);
                 let rb = bodies.index_mut_internal(result.handle);
                 let sweep = Sweep::from_poses(
                     &rb.pos.position,

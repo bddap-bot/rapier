@@ -1054,7 +1054,8 @@ pub struct RigidBodyCcd {
     /// Is CCD active for this rigid-body?
     ///
     /// Set automatically for any **dynamic** body moving fast enough to tunnel (regardless of
-    /// `self.ccd_enabled`): it then sweeps fixed colliders, or all bodies if `ccd_enabled` is set too.
+    /// `self.ccd_enabled`). Reduced-coordinate multibody links remain active for motion reporting
+    /// but are not swept because an independent pose clamp would invalidate generalized state.
     pub ccd_active: bool,
     /// Is full ("bullet") CCD enabled for this rigid-body?
     ///
