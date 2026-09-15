@@ -97,7 +97,11 @@ fn default_ccd_vs_fixed_no_tunnel() {
 
     h.step();
     assert_eq!(h.ccd.clamped_bodies(), &[body]);
-    h.run(119);
+    h.step();
+    assert_eq!(h.ccd.clamped_bodies().first(), Some(&body));
+    assert_eq!(h.ccd.drain_clamped_bodies().next(), Some(body));
+    assert!(h.ccd.clamped_bodies().is_empty());
+    h.run(118);
 
     // The body should have been stopped on the near (-X) side of the wall.
     assert!(

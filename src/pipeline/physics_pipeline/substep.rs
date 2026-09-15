@@ -284,7 +284,6 @@ impl PhysicsPipeline {
         self.counters.reset();
         self.counters.step_started();
         self.quarantine.clear();
-        ccd_solver.clear_clamped_bodies();
 
         // Apply some of delayed wake-ups.
         self.counters.stages.user_changes.start();

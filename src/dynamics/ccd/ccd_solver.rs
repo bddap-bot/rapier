@@ -49,14 +49,16 @@ impl CCDSolver {
         Self::default()
     }
 
-    /// Retains every clamp occurrence from the last pipeline step so callers can attribute CCD
-    /// incidence without mistaking the broader `ccd_active` eligibility flag for an impact.
+    /// Retains every clamp occurrence since construction or the last
+    /// [`Self::drain_clamped_bodies`] call.
     pub fn clamped_bodies(&self) -> &[RigidBodyHandle] {
         &self.clamped_bodies
     }
 
-    pub(crate) fn clear_clamped_bodies(&mut self) {
-        self.clamped_bodies.clear();
+    /// Drains every retained clamp occurrence so callers can attribute CCD incidence without
+    /// mistaking the broader `ccd_active` eligibility flag for an impact.
+    pub fn drain_clamped_bodies(&mut self) -> impl Iterator<Item = RigidBodyHandle> + '_ {
+        self.clamped_bodies.drain(..)
     }
 
     /// Updates the set of bodies that needs CCD to be resolved.
