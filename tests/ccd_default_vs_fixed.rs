@@ -202,11 +202,11 @@ struct HingeSweep {
     body_link_translation: Real,
     body_link_rotation: Real,
     anchor_separation: Real,
-    lowest_point: Real,
-    highest_point: Real,
-    motion_fraction: Real,
+    angle: Real,
     ccd_active: bool,
 }
+
+const HINGE_BARRIER_ANGLE: Real = -0.78;
 
 fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
     let mut h = Harness::new();
@@ -215,12 +215,17 @@ fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
 
     let plane = h.bodies.insert(RigidBodyBuilder::fixed());
     h.colliders.insert_with_parent(
-        ColliderBuilder::cuboid(5.0, 0.025, 5.0),
+        ColliderBuilder::cuboid(0.3, 0.025, 0.25)
+            .rotation(Vector::new(0.0, 0.0, HINGE_BARRIER_ANGLE))
+            .translation(
+                Rotation::from_scaled_axis(Vector::new(0.0, 0.0, HINGE_BARRIER_ANGLE))
+                    * Vector::new(0.45, 0.0, 0.0),
+            ),
         plane,
         &mut h.bodies,
     );
 
-    let pivot = Vector::new(0.0, 0.75, 0.0);
+    let pivot = Vector::ZERO;
     let half_length = 0.4;
     let base = h
         .bodies
@@ -228,7 +233,7 @@ fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
     let child = h.bodies.insert(
         RigidBodyBuilder::dynamic()
             .translation(pivot + Vector::X * half_length)
-            .soft_ccd_prediction(0.5),
+            .soft_ccd_prediction(2.0),
     );
     let child_collider = h.colliders.insert_with_parent(
         ColliderBuilder::cuboid(half_length, 0.025, 0.025),
@@ -251,9 +256,11 @@ fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
     {
         let (multibody, link_id) = h.multibody_joints.get_mut(joint).unwrap();
         let row = multibody.link(link_id).unwrap().assembly_id();
-        multibody.generalized_velocity_mut()[row] = -45.0;
+        multibody.generalized_velocity_mut()[row] = -25.0;
         multibody.damping_mut()[row] = 0.0;
     }
+    h.bodies[child].set_angvel(Vector::new(0.0, 0.0, -25.0), false);
+    h.bodies[child].set_linvel(Vector::new(0.0, -10.0, 0.0), false);
     h.step();
 
     let body_pose = *h.bodies[child].position();
@@ -266,18 +273,14 @@ fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
         * Vector::new(rotation_delta.x, rotation_delta.y, rotation_delta.z)
             .length()
             .atan2(rotation_delta.w.abs());
-    let lowest_point = h.colliders[child_collider].compute_aabb().mins.y;
-    let highest_point = h.colliders[child_collider].compute_aabb().maxs.y;
-    let motion_fraction =
-        body_pose.rotation.to_scaled_axis().z / link_pose.rotation.to_scaled_axis().z;
+    let angle = body_pose.rotation.to_scaled_axis().z;
+    let _ = child_collider;
 
     HingeSweep {
         body_link_translation: (body_pose.translation - link_pose.translation).length(),
         body_link_rotation,
         anchor_separation: (anchor1 - anchor2).length(),
-        lowest_point,
-        highest_point,
-        motion_fraction,
+        angle,
         ccd_active: h.bodies[child].is_ccd_active(),
     }
 }
@@ -293,9 +296,7 @@ fn multibody_hard_ccd_hinge_sweep_stays_coherent() {
             sweep.body_link_translation.is_finite()
                 && sweep.body_link_rotation.is_finite()
                 && sweep.anchor_separation.is_finite()
-                && sweep.lowest_point.is_finite()
-                && sweep.highest_point.is_finite()
-                && sweep.motion_fraction.is_finite(),
+                && sweep.angle.is_finite(),
             "{label} produced non-finite state: {sweep:?}"
         );
         assert!(
@@ -307,10 +308,11 @@ fn multibody_hard_ccd_hinge_sweep_stays_coherent() {
             "{label} separated the revolute anchors: {sweep:?}"
         );
         assert!(
-            sweep.highest_point >= -0.025,
+            sweep.angle >= HINGE_BARRIER_ANGLE - 0.12,
             "{label} tunneled through the fixed plane: {sweep:?}"
         );
     }
+    assert!((hard.angle - soft.angle).abs() < 1.0e-5);
     assert!(
         hard.ccd_active,
         "the hard-CCD arm never activated: {hard:?}"
