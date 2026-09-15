@@ -37,6 +37,8 @@ pub struct CCDSolver {
     fixed_targets_cache: Option<FixedTargetsCache>,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     clamped_bodies: Vec<RigidBodyHandle>,
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    clamp_tracking_enabled: bool,
 }
 
 /// The AABB loosening the cached fixed-target list was built with, paired with the list
@@ -53,6 +55,14 @@ impl CCDSolver {
     /// [`Self::drain_clamped_bodies`] call.
     pub fn clamped_bodies(&self) -> &[RigidBodyHandle] {
         &self.clamped_bodies
+    }
+
+    /// Enables or disables retention of clamp occurrences for diagnostics.
+    pub fn set_clamp_tracking_enabled(&mut self, enabled: bool) {
+        self.clamp_tracking_enabled = enabled;
+        if !enabled {
+            self.clamped_bodies.clear();
+        }
     }
 
     /// Drains every retained clamp occurrence so callers can attribute CCD incidence without
@@ -348,7 +358,9 @@ impl CCDSolver {
     fn apply_clamps(&mut self, bodies: &mut RigidBodySet, results: &[BodyContinuousResult]) {
         for result in results {
             if result.fraction < 1.0 {
-                self.clamped_bodies.push(result.handle);
+                if self.clamp_tracking_enabled {
+                    self.clamped_bodies.push(result.handle);
+                }
                 let rb = bodies.index_mut_internal(result.handle);
                 let sweep = Sweep::from_poses(
                     &rb.pos.position,

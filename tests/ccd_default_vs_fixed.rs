@@ -21,6 +21,8 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        let mut ccd = CCDSolver::new();
+        ccd.set_clamp_tracking_enabled(true);
         Self {
             bodies: RigidBodySet::new(),
             colliders: ColliderSet::new(),
@@ -30,7 +32,7 @@ impl Harness {
             bf: BroadPhaseBvh::new(),
             nf: NarrowPhase::new(),
             islands: IslandManager::new(),
-            ccd: CCDSolver::new(),
+            ccd,
             params: IntegrationParameters::default(),
             // No gravity: keep the fast bodies on a clean 1D path along +X.
             gravity: Vector::ZERO,
@@ -235,7 +237,7 @@ fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
             .translation(pivot + Vector::X * half_length)
             .soft_ccd_prediction(2.0),
     );
-    let child_collider = h.colliders.insert_with_parent(
+    h.colliders.insert_with_parent(
         ColliderBuilder::cuboid(half_length, 0.025, 0.025),
         child,
         &mut h.bodies,
@@ -274,7 +276,6 @@ fn one_hinge_sweep(max_ccd_substeps: usize) -> HingeSweep {
             .length()
             .atan2(rotation_delta.w.abs());
     let angle = body_pose.rotation.to_scaled_axis().z;
-    let _ = child_collider;
 
     HingeSweep {
         body_link_translation: (body_pose.translation - link_pose.translation).length(),
@@ -315,7 +316,7 @@ fn multibody_hard_ccd_hinge_sweep_stays_coherent() {
     assert!((hard.angle - soft.angle).abs() < 1.0e-5);
     assert!(
         hard.ccd_active,
-        "the hard-CCD arm never activated: {hard:?}"
+        "the hard-CCD eligibility threshold was not crossed: {hard:?}"
     );
 }
 
