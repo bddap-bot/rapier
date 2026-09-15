@@ -1,0 +1,13 @@
+{
+  "rules": [
+    {
+      "paths": ["test-map.json", "src/**", "tests/**"],
+      "tests": [
+        "nix-shell -p cargo rustc rustfmt --run 'cargo fmt --check'",
+        "nix-shell -p cargo rustc rustfmt --run 'cargo test --test ccd_default_vs_fixed'",
+        "nix-shell -p cargo rustc rustfmt --run 'cargo test --features serde-serialize,profiler'"
+      ],
+      "why": "the formatting check, focused CCD regression, and feature-enabled crate suite cover the source and regression tests used by the pinned downstream build"
+    }
+  ]
+}
