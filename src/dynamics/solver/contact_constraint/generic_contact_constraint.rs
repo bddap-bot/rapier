@@ -315,16 +315,58 @@ impl GenericContactConstraintBuilder {
                         0.0
                     };
 
-                    let r = crate::utils::inv(inv_r1 + inv_r2);
                     let rhs_wo_bias = manifold_point.tangent_velocity.gdot(tangents1[j]);
 
                     out_constraint.tangent_part[k].rhs_wo_bias[j] = rhs_wo_bias;
                     out_constraint.tangent_part[k].rhs[j] = rhs_wo_bias;
 
-                    // TODO: in 3D, we should take into account gcross[0].dot(gcross[1])
-                    // in lhs. See the corresponding code on the `velocity_constraint.rs`
-                    // file.
-                    out_constraint.tangent_part[k].r[j] = r;
+                    // 2D stores the inverse effective mass; 3D stores the effective-mass
+                    // diagonal `K_jj` for the coupled 2×2 solve.
+                    #[cfg(feature = "dim2")]
+                    {
+                        out_constraint.tangent_part[k].r[j] = crate::utils::inv(inv_r1 + inv_r2);
+                    }
+                    #[cfg(feature = "dim3")]
+                    {
+                        out_constraint.tangent_part[k].r[j] = inv_r1 + inv_r2;
+                    }
+                }
+
+                // The tangent off-diagonal `K₀₁ = J_t0·M⁻¹·J_t1ᵀ`, stored as `2·K₀₁` like the
+                // rigid-body constraints. A multibody link's tangent-plane mobility is
+                // anisotropic through its joints, so `K₀₁` is far from zero there, and solving
+                // the two tangents with only the diagonal is a Jacobi step inside the
+                // Gauss-Seidel sweep that can diverge (bddap/rl#351).
+                #[cfg(feature = "dim3")]
+                {
+                    let ndofs1 = multibody1.map(|mb| mb.0.ndofs()).unwrap_or(0);
+                    let ndofs2 = multibody2.map(|mb| mb.0.ndofs()).unwrap_or(0);
+                    let j_step = (ndofs1 + ndofs2) * 2;
+                    let t0 = chunk_j_id + k * j_step * DIM + j_step;
+                    let t1 = t0 + j_step;
+                    let side = |offset: usize, ndofs: usize| {
+                        jacobians
+                            .rows(t0 + offset, ndofs)
+                            .dot(&jacobians.rows(t1 + offset + ndofs, ndofs))
+                    };
+                    let tp = &out_constraint.tangent_part[k];
+                    let k01_1 = if multibody1.is_some() {
+                        side(0, ndofs1)
+                    } else if type1.is_dynamic_or_kinematic() {
+                        tangents1[0].dot(mprops1.effective_inv_mass * tangents1[1])
+                            + tp.ii_torque_dir1[0].gdot(tp.torque_dir1[1])
+                    } else {
+                        0.0
+                    };
+                    let k01_2 = if multibody2.is_some() {
+                        side(ndofs1 * 2, ndofs2)
+                    } else if type2.is_dynamic_or_kinematic() {
+                        tangents1[0].dot(mprops2.effective_inv_mass * tangents1[1])
+                            + tp.ii_torque_dir2[0].gdot(tp.torque_dir2[1])
+                    } else {
+                        0.0
+                    };
+                    out_constraint.tangent_part[k].r[2] = 2.0 * (k01_1 + k01_2);
                 }
             }
 
@@ -478,8 +520,11 @@ impl GenericContactConstraintBuilder {
                 tangent_part.impulse_accumulator += tangent_part.impulse;
                 tangent_part.impulse *= params.warmstart_coefficient;
 
+                // Clamped like the normal bias (see the twist-friction `update`).
+                let max_corrective_velocity = params.max_corrective_velocity();
                 for j in 0..DIM - 1 {
-                    let bias = (p1 - p2).gdot(tangents1[j]) * inv_dt;
+                    let bias = ((p1 - p2).gdot(tangents1[j]) * inv_dt)
+                        .clamp(-max_corrective_velocity, max_corrective_velocity);
                     tangent_part.rhs[j] = tangent_part.rhs_wo_bias[j] + bias;
                 }
             }

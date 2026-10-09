@@ -439,8 +439,10 @@ impl ContactWithCoulombFrictionBuilder {
                 tangent_part.impulse_accumulator += tangent_part.impulse;
                 tangent_part.impulse *= warmstart_coeff;
 
+                // Clamped like the normal bias (see the twist-friction `update`).
                 for j in 0..DIM - 1 {
-                    let bias = (p1 - p2).gdot(tangents1[j]) * inv_dt;
+                    let bias = ((p1 - p2).gdot(tangents1[j]) * inv_dt)
+                        .simd_clamp(-max_corrective_velocity, max_corrective_velocity);
                     tangent_part.rhs[j] = tangent_part.rhs_wo_bias[j] + bias;
                 }
             }

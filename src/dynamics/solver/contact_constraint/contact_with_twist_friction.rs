@@ -502,8 +502,12 @@ impl ContactWithTwistFrictionBuilder<SimdReal> {
             let p1 = poses1.transform_point(self.local_friction_center1) + tangent_delta;
             let p2 = poses2.transform_point(self.local_friction_center2);
 
+            // The anchor drift is clamped like the normal bias: a sliding point's frozen
+            // anchors drift by its whole step's slip, and undoing that within one substep
+            // asks friction for (substeps × slip speed) (bddap/rl#351).
             for j in 0..DIM - 1 {
-                let bias = (p1 - p2).gdot(tangents1[j]) * inv_dt;
+                let bias = ((p1 - p2).gdot(tangents1[j]) * inv_dt)
+                    .simd_clamp(-max_corrective_velocity, max_corrective_velocity);
                 tangent_part.rhs[j] = tangent_part.rhs_wo_bias[j] + bias;
             }
             tangent_part.impulse_accumulator += tangent_part.impulse;

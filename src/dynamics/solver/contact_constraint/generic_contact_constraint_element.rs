@@ -283,9 +283,14 @@ impl ContactConstraintTangentPart<Real> {
                 solver_vels,
             ) + self.rhs[1];
 
+            // Exact coupled 2×2 solve `Δλ = -K⁻¹·dvel`, as in the rigid-body constraints.
+            let k11 = self.r[0];
+            let k22 = self.r[1];
+            let k12 = self.r[2] * 0.5;
+            let inv_det = crate::utils::inv(k11 * k22 - k12 * k12);
             let new_impulse = na::Vector2::new(
-                self.impulse[0] - self.r[0] * dvel_0,
-                self.impulse[1] - self.r[1] * dvel_1,
+                self.impulse[0] - (k22 * dvel_0 - k12 * dvel_1) * inv_det,
+                self.impulse[1] - (k11 * dvel_1 - k12 * dvel_0) * inv_det,
             );
             let new_impulse = new_impulse.cap_magnitude(limit);
 
